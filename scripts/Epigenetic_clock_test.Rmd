@@ -1,0 +1,940 @@
+---
+title: "Testing various epigenetic clocks on publicly available retina datasets"
+author: "kendrix"
+date: "6/9/2020"
+output:
+  html_document:
+      highlight: pygments
+      theme: united
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Aim: To confirm the use of Horvath clock in publicly available retina data. 
+
+Pre-processing script adapted from Chaini Konwar.
+
+
+----------------------------------------------------------------------------------------------------
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(GEOquery)
+library(RCurl)
+library(GEOmetadb)
+library(dendextend)
+library(ArrayExpress)
+library(methylumi)
+library(lumi)
+library(lattice)
+library(gplots)
+library(RColorBrewer)
+library(limma)
+library(matrixStats)
+library(reshape)
+library(sva)
+library(grid)
+library(gridExtra)
+library(ape)
+library(Hmisc)
+library(RCurl)
+library(wateRmelon)
+library(minfiData)
+library(minfi)
+library(robustHD)
+library(ewastools)
+library(doParallel)
+library(jcolors)
+library(plyr)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(Biobase)
+library(data.table)
+library(factoextra)
+library(Metrics)
+library(quantro)
+
+setwd("~/KoborLab/kobor_space/kendrix/macular_degeneration/")
+```
+
+----------------------------------------------------------------------------------------------------
+
+
+##Data exploration and object creation
+
+
+###Step 1: Download data from GEO and explore.
+
+GEO Accession number: GSE102952 & GSE57362 (450K).
+
+NOTE: I only used **GSE102952** data after exploring GSE57362 dataset and discovering that the dataset does not contain **age** information and the beta values do not look consistent. 
+
+```{r, results='hide'}
+#Download data from GEO and extract pData.
+GSE102952 <- getGEO("GSE102952", GSEMatrix = TRUE)
+show(GSE102952)
+
+#Extract pData and clean up.
+GSE102952_pData <- pData(GSE102952[[1]])
+dim(GSE102952_pData)
+
+colnames(GSE102952_pData)[1] <- "Sample_Name"
+colnames(GSE102952_pData)[2] <- "GEO_Accession"
+colnames(GSE102952_pData)[10] <- "Tissue"
+colnames(GSE102952_pData)[11] <- "Sex"
+colnames(GSE102952_pData)[12] <- "Age"
+colnames(GSE102952_pData)[13] <- "Disease_State"
+colnames(GSE102952_pData)[36] <- "Sample_Group"
+
+GSE102952_pData$Tissue <- gsub("tissue: ", "", GSE102952_pData$Tissue)
+GSE102952_pData$Sex <- gsub("Sex: ", "", GSE102952_pData$Sex)
+GSE102952_pData$Age <- gsub("age: ", "", GSE102952_pData$Age)
+GSE102952_pData$Disease_State <- gsub("disease: ", "", GSE102952_pData$Disease_State)
+GSE102952_pData$Disease_State <- gsub("control", "Control", GSE102952_pData$Disease_State)
+GSE102952_pData$Sample_Group <- gsub("/glaucoma", "", gsub("LCM ", "", gsub("control", "Control", GSE102952_pData$Sample_Group)))
+
+rownames(GSE102952_pData) <- GSE102952_pData$Sample_Name
+```
+
+```{r, eval=FALSE}
+#Download data from GEO and extract pData.
+GSE57362 <- getGEO("GSE57362", GSEMatrix = TRUE)
+show(GSE57362)
+
+#Extract pData and clean up.
+GSE57362_pData <- pData(GSE57362[[1]])
+dim(GSE57362_pData)
+
+colnames(GSE57362_pData)[1] <- "Sample_Name"
+colnames(GSE57362_pData)[2] <- "GEO_Accession"
+colnames(GSE57362_pData)[10] <- "Disease_State"
+colnames(GSE57362_pData)[11] <- "Tissue"
+colnames(GSE57362_pData)[12] <- "Health_State"
+
+GSE57362_pData$Disease_State <- gsub("disease state: ", "", GSE57362_pData$Disease_State)
+GSE57362_pData$Tissue <- gsub("tissue: ", "", GSE57362_pData$Tissue)
+GSE57362_pData$Health_State <- gsub("health state: ", "", GSE57362_pData$Health_State)
+
+GSE57362_pData$Original_ID <- GSE57362_pData$Sample_Name
+
+GSE57362_pData$Sample_Name <- gsub("Normal neuroretina ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Neuroretina from non- proliferative diabetic retinopathy ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Fibrovascular membranes from diabetic retinopathy ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Normal iris ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Uveal melanoma ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Membrane from proliferative vitreoretinopathy ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Retinoblastoma ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Normal Retina ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Normal Sclera ", "", GSE57362_pData$Sample_Name)
+GSE57362_pData$Sample_Name <- gsub("Retinoblastoma blood_", "", GSE57362_pData$Sample_Name)
+```
+
+```{r}
+#Get beta values from GEO data.
+GSE102952_betas <- exprs(GSE102952[[1]])
+colnames(GSE102952_betas) <- GSE102952_pData$Sample_Name
+all(rownames(GSE102952_pData) == colnames(GSE102952_betas))
+
+#Check if beta values look normalised. 
+#Download 450K manifest from shared coding space.
+load("~/KoborLab/kobor_space/shared_coding_resource/HM450_fdat.RData")
+dim(fData_450)
+
+#Check if the CpGs correspond with the CpGs from the manifest.
+manifest <- fData_450[rownames(fData_450)%in%rownames(GSE102952_betas),]
+dim(manifest)
+
+#Subset data based on probe types - Either Type 1 or Type 2. 
+probe_types <- fData_450$INFINIUM_DESIGN_TYPE
+
+#Subset Type 1 probe data. 
+type_1 <- subset(fData_450, fData_450$INFINIUM_DESIGN_TYPE == "I")
+dim(type_1)
+
+#See how many Type 1 CpGs correspond with the Type 1 probe data.  
+type_1betas <- GSE102952_betas[rownames(GSE102952_betas)%in%rownames(type_1),]
+dim(type_1betas)
+
+#Subset Type 2 probe data. 
+type_2 <- subset(fData_450, fData_450$INFINIUM_DESIGN_TYPE == "II")
+dim(type_2)
+
+#See how many Type 2 CpGs correspond with the Type 2 probe data. 
+type_2betas <- GSE102952_betas[rownames(GSE102952_betas)%in%rownames(type_2),]
+dim(type_2betas)
+
+#Plot normalisation plot. 
+plot(c(0,1), c(0,10), xlab = "Beta values", ylab = "Density", main = "")
+lines(density(na.omit(type_1betas)), col = "red", lty = 2, lwd = 2)
+lines(density(na.omit(type_2betas)), col = "blue", lty = 1, lwd = 2)
+legend("top", inset = 0.05, cex = 1.0, c("Type 1", "Type 2"), col = c("red", "blue"), lty = c(2,1), horiz = FALSE)
+```
+
+```{r, eval=FALSE}
+#Get beta values from GEO data.
+GSE57362_raw_path <- getGEOSuppFiles("GSE57362", fetch_files = TRUE, baseDir = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data")
+gunzip("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE57362/GSE57362_beta.txt.gz")
+
+GSE57362_betas <- read.table("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE57362/GSE57362_beta.txt", header = TRUE)
+rownames(GSE57362_betas) <- GSE57362_betas$ID
+GSE57362_betas <- GSE57362_betas[,c(F,T)]
+GSE57362_betas <- m2beta(GSE57362_betas)
+
+#Check if beta values look normalised. 
+#Download 450K manifest from shared coding space.
+load("~/KoborLab/kobor_space/shared_coding_resource/HM450_fdat.RData")
+dim(fData_450)
+
+#Check if the CpGs correspond with the CpGs from the manifest.
+manifest <- fData_450[rownames(fData_450)%in%rownames(GSE57362_betas),]
+dim(manifest)
+
+#Subset data based on probe types - Either Type 1 or Type 2. 
+probe_types <- fData_450$INFINIUM_DESIGN_TYPE
+
+#Subset Type 1 probe data. 
+type_1 <- subset(fData_450, fData_450$INFINIUM_DESIGN_TYPE == "I")
+dim(type_1)
+
+#See how many Type 1 CpGs correspond with the Type 1 probe data.  
+type_1betas <- GSE57362_betas[rownames(GSE57362_betas)%in%rownames(type_1),]
+dim(type_1betas)
+
+#Subset Type 2 probe data. 
+type_2 <- subset(fData_450, fData_450$INFINIUM_DESIGN_TYPE == "II")
+dim(type_2)
+
+#See how many Type 2 CpGs correspond with the Type 2 probe data. 
+type_2betas <- GSE57362_betas[rownames(GSE57362_betas)%in%rownames(type_2),]
+dim(type_2betas)
+
+#Plot normalisation plot. 
+plot(c(0,1), c(0,10), xlab = "Beta values", ylab = "Density", main = "") +
+lines(density(na.omit(type_1betas)), col = "red", lty = 2, lwd = 2) +
+lines(density(na.omit(type_2betas)), col = "blue", lty = 1, lwd = 2) +
+legend("top", inset = 0.05, cex = 1.0, c("Type 1", "Type 2"), col = c("red", "blue"), lty = c(2,1), horiz = FALSE)
+```
+
+
+###Step 2: Check sample identity. 
+
+```{r}
+#Use SNP probes to infer identity and see how they cluster. 
+load("~/KoborLab/kobor_space/kendrix/ethnicity/SNP_probes.RData")
+rownames(SNP_probes) <- SNP_probes$CpG #65 SNP probes. 
+snp_betas <- GSE102952_betas[which(rownames(GSE102952_betas) %in% rownames(SNP_probes)),]
+dim(snp_betas) #0 - meaning the SNP probes are not available in this dataset. 
+```
+
+
+###Step 3: Sex check. 
+
+Since the SNP probes are not available, another way to check sample identity is to perform sex check using the sex probes. 
+
+Code by: Chaini Konwar.
+
+```{r, fig.align='center'}
+data(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+data(Locations)
+dim(sexProbeIDs <- Locations[which(Locations$chr == "chrY" | Locations$chr == "chrX"), ]) %>% as.data.frame()
+
+sexBetas <- GSE102952_betas[which(rownames(GSE102952_betas) %in% rownames(sexProbeIDs)),]
+dim(sexBetas)
+distSex <- dist(t(sexBetas))
+clustSex <- hclust(distSex)
+label_by_sex <- gsub("F", "firebrick3", gsub("M", "deepskyblue", GSE102952_pData$Sex))
+plot(as.phylo(clustSex), lab4ut="axial", type = "unrooted", edge.width = 0.5, cex = 0.5, tip.color = label_by_sex)
+```
+
+```{r, fig.align='center'}
+all(colnames(GSE102952_betas) == rownames(GSE102952_pData)) #Check order to combine metadata with loadings later. 
+PCA_full <- princomp(na.omit(GSE102952_betas)) 
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+meta <- GSE102952_pData[,"Sex"]
+PCAmeta <- cbind(meta,Loadings)
+
+#Set the colour of the PC plots.
+Sex <- as.factor(GSE102952_pData$Sex)
+
+ggplot(PCAmeta, aes(Comp.1, Comp.2, color = Sex)) + labs(x = "PC1", y = "PC2", caption = "GSE102952 Sex Check") + 
+  geom_point(size = 3, alpha = 1) + theme_bw() + scale_color_discrete("Sex") +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + 
+  theme(axis.text = element_text(), axis.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust = 0.5, size = rel(1.5)))
+```
+
+
+###Step 4: Run PCA. 
+
+```{r}
+sum(is.na(GSE102952_betas)) #177 NAs in beta matrix.
+PCA_full <- princomp(na.omit(GSE102952_betas)) 
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance <- vars/sum(vars)
+adjust <- 1-Importance[1]
+pca_adjusted <- Importance[2:length(Importance)]/adjust
+pca_df <- data.frame(adjusted_variance = pca_adjusted, PC = seq(1:length(pca_adjusted)))
+
+GSE102952_pData$Sex <- as.factor(GSE102952_pData$Sex)
+GSE102952_pData$Disease_State <- as.factor(GSE102952_pData$Disease_State)
+GSE102952_pData$Age <- as.numeric(GSE102952_pData$Age)
+
+colnames(GSE102952_pData) # to obtain the column numbers you want to include
+meta_categorical <- GSE102952_pData[, c("Sex", "Disease_State")]  # input column numbers in meta that contain categorical variables
+colnames(meta_categorical)[2] <- "Disease State"
+meta_continuous <- data.frame(GSE102952_pData[, "Age"])  # input column numbers in meta that contain continuous variables
+colnames(meta_continuous) <- "Age"
+
+Order <- c(seq(1:sum(ncol(meta_categorical), ncol(meta_continuous))))
+Num <- 17 # This number will depend on your dataset - if you only have 6 samples, you should probably only show 5 PCs or less...
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.height=9, fig.width=8}
+#Run PCA.
+source("~/KoborLab/kobor_space/kendrix/R_Functions/heat_scree_plot.R", local = knitr::knit_global())
+heat_scree_plot(Loadings, Importance, Num, Order)
+```
+
+
+----------------------------------------------------------------------------------------------------
+
+
+##Epigenetic clocks
+
+
+###Step 1: Prepare data to run Horvath, Hannum and PhenoAge clocks.
+
+This is the site with information pertaining to the Hovarth clock input. Note that the site runs all three clocks: Horvath, Hannum and PhenoAge clocks (among other clocks - refer to Horvath’s manual (Location: ~KoborLab/kobor_space/kendrix/macular_degeneration/ManualEpigeneticClock3.pdf)) simultaneously with the same input.
+
+Input: Data frame of betas from noob-normalised MSet object with Sample IDs as columns.
+
+```{r, results='hide'}
+#Horvath data prep function. 
+horvathPrep <- function(dat){
+  dat <- as.data.frame(dat)
+  dat0= cbind(rownames(dat), dat) #Need col 1 to be CpG probe ID
+  datMiniAnnotation=read.csv("~/KoborLab/kobor_space/shared_coding_resource/Horvath_Age_Prediction/datMiniAnnotation3.csv") #Get from Horvath website above
+  match1=match(datMiniAnnotation[,1], dat0[,1] )
+  dat0Reduced=dat0[match1,]
+  dat0Reduced[,1]=as.character(dat0Reduced[,1])
+  dat0Reduced[is.na(match1),1]= as.character(datMiniAnnotation[is.na(match1),1])
+  datout=data.frame(dat0Reduced)
+  #Make sure you output numeric variables...
+  for (i in 2:dim(datout)[[2]]  ){datout[,i]= as.numeric(as.character(gsub(x=datout[,i],pattern="\"",replacement=""))) }
+  colnames(datout)[1] <- "Probe"                         
+  return(datout)}
+
+#Prepare methylation data for Horvath clock. 
+GSE102952_betas.Horvath <- horvathPrep(GSE102952_betas)
+```
+
+```{r, eval=FALSE}
+write.table(GSE102952_betas.Horvath,"~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952_betas.Horvath.csv", row.names = F, sep = ",")
+```
+
+For ‘Advanced Blood Analysis’ (more columns in output including Hannum & Weidner clocks, as well as cell type estimate, etc. you need to create an annotation file to be used with calculating epigenetic age. We need three variables as well as the first column representing the sample names. - Column 1: Sample ID which contains a list of the same ordered names as the methylation file - Column 2: Chronological age as an integer - Column 3: Titled “Female”, male = 0 and female = 1. This is used to validate gender labels - Column 4: “Tissue”, from [Horvath’s PDF tutorial](https://github.com/kobor-lab/Methylation-Array-Analysis/blob/master/analysis%20scripts/DNAm%20Age%20-%20Horvath/Horvath_details.pdf).
+
+```{r, results='hide'}
+#Make sample file for Advanced Analysis in Blood. 
+Sample_Annotation <- GSE102952_pData
+head(Sample_Annotation)
+
+Sample_Annotation <- Sample_Annotation[, c("Sample_Name", "Age", "Sex", "Tissue", "Disease_State",  "Sample_Group")]
+Sample_Annotation$Sex <- gsub("F", "1", gsub("M", "0", Sample_Annotation$Sex))
+colnames(Sample_Annotation)[3] <- "Female"
+rownames(Sample_Annotation) <- Sample_Annotation$Sample_Name
+
+str(Sample_Annotation)
+
+test <- GSE102952_betas.Horvath[, c(2:ncol(GSE102952_betas.Horvath))]
+identical(rownames(Sample_Annotation), colnames(test)) #Need to be TRUE.
+```
+
+```{r}
+write.table(Sample_Annotation,"~/KoborLab/kobor_space/kendrix/macular_degeneration/data/Sample_Annotation_GSE102952.csv", row.names = F, sep = ",")
+```
+
+
+###Step 2: Explore output of Horvath, Hannum and PhenoAge clocks.
+
+After the epigenetic ages are calculated and the output is obtained from the Horvath team, upload the output to the server to be visualised.
+
+```{r}
+GSE102952_Epigenetic_Age <- read.csv(file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952_betas.output.csv", row.names = 1)
+
+#Check sample order. 
+rownames(GSE102952_pData) <- GSE102952_pData$Sample_Name
+identical(rownames(GSE102952_pData), rownames(GSE102952_Epigenetic_Age)) #TRUE.
+
+colnames(GSE102952_Epigenetic_Age)[59] <- "Sex"
+GSE102952_Epigenetic_Age$Sex <- gsub("0", "Male", gsub("1", "Female", GSE102952_Epigenetic_Age$Sex))
+```
+
+
+###Step 3: Horvath clock.
+
+The Horvath clock is a pan-tissue epigenetic clock that will predict the DNAm age of tissues based on 353 CpG sites that were developed from 8,000 samples from 82 datasets.
+
+Note that even though the Horvath clock was trained using multiple tissues, none of the tissues are retina tissues that are in this dataset.
+
+Error: +/- 3.6 years.
+
+```{r, fig.align='center'}
+#Subset relevant epigenetic age variables. 
+GSE102952_Epigenetic_Age_Horvath <- GSE102952_Epigenetic_Age[, c("Sample_Name", "Sample_Group", "Disease_State", "Sex", "predictedGender", "Tissue", "predictedTissue", "Age", "DNAmAge", "AgeAccelerationDiff", "AgeAccelerationResidual")] 
+
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_Age_Horvath$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of Horvath predicted DNAmAge against reported age:
+GSE102952_HO_plot <- lm(DNAmAge ~ Age, data = GSE102952_Epigenetic_Age_Horvath)
+ggplotRegression(GSE102952_HO_plot) + labs(x = "Reported age", y = "Horvath predicted age", caption = "Comparing reported age and predicted age using Horvath epigenetic clock") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_Age_Horvath$Sample_Group <- factor(GSE102952_Epigenetic_Age_Horvath$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_Age_Horvath, 
+       aes(x = Sample_Group, y = AgeAccelerationResidual, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Disease State") + ylab("Horvath Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_Age_Horvath$Sex <- factor(GSE102952_Epigenetic_Age_Horvath$Sex)
+ggplot(data = GSE102952_Epigenetic_Age_Horvath, 
+       aes(x = Sex, y = AgeAccelerationResidual, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("Horvath Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 4: Hannum clock.
+
+Built from the whole blood of 656 human individuals, aged 19 to 101, this clock looks at 71 CpG sites that are highly predictive of age.
+
+```{r, fig.align='center'}
+#Subset relevant epigenetic age variables. 
+GSE102952_Epigenetic_Age_Hannum <- GSE102952_Epigenetic_Age[, c("Sample_Name", "Sample_Group", "Sex", "predictedGender", "Tissue", "predictedTissue", "Age", "DNAmAgeHannum", "AgeAccelerationResidualHannum")] 
+
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_Age_Hannum$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of Hannum predicted DNAmAge against reported age:
+GSE102952_HA_plot <- lm(DNAmAgeHannum ~ Age, data = GSE102952_Epigenetic_Age_Hannum)
+ggplotRegression(GSE102952_HA_plot) + labs(x = "Reported age", y = "Hannum predicted age", caption = "Comparing reported age and predicted age using Hannum epigenetic clock") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_Age_Hannum$Sample_Group <- factor(GSE102952_Epigenetic_Age_Hannum$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_Age_Hannum, 
+       aes(x = Sample_Group, y = AgeAccelerationResidualHannum, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Disease State") + ylab("Hannum Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_Age_Hannum$Sex <- factor(GSE102952_Epigenetic_Age_Hannum$Sex)
+ggplot(data = GSE102952_Epigenetic_Age_Hannum, 
+       aes(x = Sex, y = AgeAccelerationResidualHannum, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("Hannum Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 5: PhenoAge clock.
+
+Developed from 513 CpG sites, this clock was built to serve as prediction of a surrogate measure of “phenotypic age” that, in and of itself, differentiates morbidity and mortality risk among same-age individuals (optimized to predict a multi-system proxy of physiological dysregulation (phenotypic age)). The clock shares 41 CpGs in the Horvath clock and 5 CpGs in the Hannum clock (which was also present in the Horvath clock).
+
+```{r, fig.align='center'}
+#Subset relevant epigenetic age variables. 
+GSE102952_Epigenetic_PhenoAge <- GSE102952_Epigenetic_Age[, c("Sample_Name", "Sample_Group", "Sex", "predictedGender", "Tissue", "predictedTissue", "Age", "DNAmPhenoAge", "AgeAccelPheno")] 
+
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_PhenoAge$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of PhenoAge predicted DNAmAge against reported age:
+GSE102952_PhenoAge_plot <- lm(DNAmPhenoAge ~ Age, data = GSE102952_Epigenetic_PhenoAge)
+ggplotRegression(GSE102952_PhenoAge_plot) + labs(x = "Reported age", y = "PhenoAge predicted age", caption = "Comparing reported age and predicted age using PhenoAge epigenetic clock") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_PhenoAge$Sample_Group <- factor(GSE102952_Epigenetic_PhenoAge$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_PhenoAge, 
+       aes(x = Sample_Group, y = AgeAccelPheno, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Disease State") + ylab("PhenoAge Acceleration Residual") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_PhenoAge$Sex <- factor(GSE102952_Epigenetic_PhenoAge$Sex)
+ggplot(data = GSE102952_Epigenetic_PhenoAge, 
+       aes(x = Sex, y = AgeAccelPheno, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("PhenoAge Acceleration Residual") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 6: Skin & Blood clock.
+
+A DNA methylation-based age predictor (based on 391 CpGs) that was developed to accurately measure the age of human fibroblasts, keratinocytes, buccal cells, endothelial cells, skin and blood samples. This clock shares 45 CpGs (out of 71 CpGs) with the blood-based clock from Hannum (2013) and 60 CpGs (out of 353 CpGs) with the pan tissue clock from Horvath (2013). Despite this significant overlap, epigenetic age acceleration of the skin & blood clock exhibits only moderate correlations with corresponding epigenetic age acceleration measures by Horvath (2013) and Hannum (2013) (r=0.5 and r=0.59, p<1.E-110) in the blood samples from the Women’s Health Initiative (BA23 study).
+
+```{r, fig.align='center'}
+#Subset relevant epigenetic age variables. 
+GSE102952_Epigenetic_AgeSkinBlood <- GSE102952_Epigenetic_Age[, c("Sample_Name", "Sample_Group", "Sex", "predictedGender", "Tissue", "predictedTissue", "Age", "DNAmAgeSkinBloodClock")] 
+GSE102952_Epigenetic_AgeSkinBlood$AgeAccelSkinBlood <- lm(DNAmAgeSkinBloodClock ~ Age, data = GSE102952_Epigenetic_AgeSkinBlood)$residuals
+
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_AgeSkinBlood$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of Skin & Blood clock predicted DNAmAge against reported age:
+GSE102952_AgeSkinBlood_plot <- lm(DNAmAgeSkinBloodClock ~ Age, data = GSE102952_Epigenetic_AgeSkinBlood)
+ggplotRegression(GSE102952_AgeSkinBlood_plot) + labs(x = "Reported age", y = "Skin & Blood predicted age", caption = "Comparing reported age and predicted age using Skin & Blood epigenetic clock") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_AgeSkinBlood$Sample_Group <- factor(GSE102952_Epigenetic_AgeSkinBlood$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_AgeSkinBlood, 
+       aes(x = Sample_Group, y = AgeAccelSkinBlood, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Disease State") + ylab("Skin & Blood Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_AgeSkinBlood$Sex <- factor(GSE102952_Epigenetic_AgeSkinBlood$Sex)
+ggplot(data = GSE102952_Epigenetic_AgeSkinBlood, 
+       aes(x = Sex, y = AgeAccelSkinBlood, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("Skin & Blood Age Acceleration Residual") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 7: Prepare data for Zhang clock.
+
+```{r}
+GSE102952_Epigenetic_Age_Zhang <- GSE102952_Epigenetic_Age[, c("Sample_Name", "Sample_Group", "Tissue", "Sex", "Age")]
+
+GSE102952_betas.Zhang <- GSE102952_betas
+```
+
+
+###Step 8: Run Zhang clock.
+
+Adapted from predictor code for Zhang clock (Zhang et al. 2019).
+
+This script is used to do age prediction based on Illumina 450K DNA methylation data. Coefficients of the predictor are based on 13,566 training samples. Two age predictors based on different methods (Elastic Net and BLUP) can be used.
+
+```{r}
+#Function changes missing value to mean value across all individuals for each probe. 
+addna<-function(methy){
+        methy[is.na(methy)]<-mean(methy,na.rm=T)
+        return(methy)
+}
+
+#Load beta matrix and check format.
+if(nrow(GSE102952_betas.Zhang) > ncol(GSE102952_betas.Zhang)){
+        GSE102952_betas.Zhang <- t(GSE102952_betas.Zhang)
+}
+
+#Replace any NA with mean value for each probe.
+dataNona <- apply(GSE102952_betas.Zhang, 2, function(x) addna(x)) 
+
+#Standardise beta values within each individual by removing the mean and dividing by standard deviation for each individual. (Probe * IND).
+dataNona.norm <- apply(dataNona, 1, scale)
+rownames(dataNona.norm) <- colnames(dataNona)
+
+#Get the ElasticNet predictor coefficient of each probe.
+encoef <- read.table("~/KoborLab/kobor_space/kendrix/macular_degeneration/Zhang_Age_Predictor/en.coef", 
+                     stringsAsFactor = FALSE, header = TRUE)
+en_int <- encoef[1,2]
+encoef <- encoef[-1,]
+rownames(encoef) <- encoef$probe
+
+#Get the BLUP coefficient of each probe.
+blupcoef <- read.table("~/KoborLab/kobor_space/kendrix/macular_degeneration/Zhang_Age_Predictor/blup.coef",
+                       stringsAsFactor = FALSE, header = TRUE)
+blup_int <- blupcoef[1,2]
+blupcoef <- blupcoef[-1,]
+rownames(blupcoef) <- blupcoef$probe
+
+#Get common probes between predictors and data.
+encomm <- intersect(rownames(encoef), rownames(dataNona.norm))
+blupcomm <- intersect(rownames(blupcoef), rownames(dataNona.norm))
+
+#Check for missing probes.
+endiff <- nrow(encoef) - length(encomm)
+blupdiff <- nrow(blupcoef) - length(blupcomm)
+
+print(paste0 (endiff, " probe(s) in Elastic Net predictor is(are) not in the data"))
+print(paste0 (blupdiff, " probe(s) in BLUP predictor is(are) not in the data"))
+print("BLUP can perform better if the number of missing probes is too large!")
+
+#Extract common probes and perform age prediction.
+encoef <- encoef[encomm,]
+blupcoef <- blupcoef[blupcomm,]
+ElasticNetPredAge <- encoef$coef%*%dataNona.norm[encomm,] + en_int
+BLUPPredAge <- blupcoef$coef%*%dataNona.norm[blupcomm,] + blup_int
+
+#Add predicted results to metadata. 
+ElasticNetPredAge <- ElasticNetPredAge[, GSE102952_Epigenetic_Age_Zhang$Sample_Name]
+GSE102952_Epigenetic_Age_Zhang$ElasticNetPredAge <- as.double(ElasticNetPredAge)
+GSE102952_Epigenetic_Age_Zhang$ElasticNetAgeAccelResidual <- lm(ElasticNetPredAge ~ Age, 
+                                                          data = GSE102952_Epigenetic_Age_Zhang)$residuals
+
+BLUPPredAge <- BLUPPredAge[, GSE102952_Epigenetic_Age_Zhang$Sample_Name]
+GSE102952_Epigenetic_Age_Zhang$BLUPPredAge <- as.double(BLUPPredAge)
+GSE102952_Epigenetic_Age_Zhang$BLUPAgeAccelResidual <- lm(BLUPPredAge ~ Age, 
+                                                    data = GSE102952_Epigenetic_Age_Zhang)$residuals
+```
+
+
+###Step 9: Zhang clock - ElasticNet method.
+
+```{r, fig.align='center'}
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_Age_Zhang$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of PhenoAge predicted DNAmAge against reported age:
+GSE102952_ENZhang_plot <- lm(ElasticNetPredAge ~ Age, data = GSE102952_Epigenetic_Age_Zhang)
+ggplotRegression(GSE102952_ENZhang_plot) + labs(x = "Reported age", y = "Zhang predicted age", caption = "Comparing reported age and predicted age using Zhang epigenetic clock - ElasticNet method") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_Age_Zhang$Sample_Group <- factor(GSE102952_Epigenetic_Age_Zhang$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_Age_Zhang, 
+       aes(x = Sample_Group, y = ElasticNetAgeAccelResidual, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Disease State") + ylab("Zhang Acceleration Residual (ElasticNet)") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_Age_Zhang$Sex <- factor(GSE102952_Epigenetic_Age_Zhang$Sex)
+ggplot(data = GSE102952_Epigenetic_Age_Zhang, 
+       aes(x = Sex, y = ElasticNetAgeAccelResidual, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("Zhang Acceleration Residual (ElasticNet)") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 10: Zhang clock - BLUP method. 
+
+```{r, fig.align='center'}
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = GSE102952_Epigenetic_Age_Zhang$Sex)) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+#Regression plot of PhenoAge predicted DNAmAge against reported age:
+GSE102952_BLUPZhang_plot <- lm(BLUPPredAge ~ Age, data = GSE102952_Epigenetic_Age_Zhang)
+ggplotRegression(GSE102952_BLUPZhang_plot) + labs(x = "Reported age", y = "Zhang predicted age", caption = "Comparing reported age and predicted age using Zhang epigenetic clock - BLUP method") + 
+  scale_colour_manual(name = "Sex", values = c("#990000", "#2c7dab")) +
+  stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+```
+
+```{r, fig.align='center'}
+#Plot of overall disease state vs control:
+GSE102952_Epigenetic_Age_Zhang$Sample_Group <- factor(GSE102952_Epigenetic_Age_Zhang$Sample_Group)
+ggplot(data = GSE102952_Epigenetic_Age_Zhang, 
+       aes(x = Sample_Group, y = BLUPAgeAccelResidual, fill = Sample_Group)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sample Group") + ylab("Zhang Acceleration Residual (BLUP)") + 
+  scale_x_discrete(breaks = c("AMD","Control"), 
+                   labels = c("Age-Related Macular Degeneration", "Normal")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"),
+              legend.position = "none")
+```
+
+```{r, fig.align='center'}
+#Plot of disease state vs control that is stratified by sex:
+GSE102952_Epigenetic_Age_Zhang$Sex <- factor(GSE102952_Epigenetic_Age_Zhang$Sex)
+ggplot(data = GSE102952_Epigenetic_Age_Zhang, 
+       aes(x = Sex, y = BLUPAgeAccelResidual, fill = Sample_Group)) + 
+  geom_boxplot(position = position_dodge(0.7), width = 0.5, outlier.shape = NA) +
+  geom_jitter(aes(fill = Sample_Group), size = 1, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)) + 
+  xlab("Sex") + ylab("Zhang Acceleration Residual (BLUP)") + 
+  scale_x_discrete(breaks = c("Female","Male"), 
+                   labels = c("Female", "Male")) + 
+  scale_fill_manual(values = c("#77284e", "#ffffff")) +
+  theme_classic() + theme(
+              panel.border = element_blank(),
+              panel.background = element_blank(),
+              plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+              text = element_text(family = "Tahoma"),
+              axis.title = element_text(face = "bold"),
+              axis.text.x = element_text(colour = "black", size = 11),
+              axis.text.y = element_text(colour = "black", size = 9),
+              axis.line = element_line(size = 0.5, colour = "black"))
+```
+
+
+###Step 11: DNAm Cortical clock.
+
+[Shireby et al. (2020) Recalibrating the Epigenetic Clock: Implications for Assessing Biological Age in the Human Cortex.] (https://doi.org/10.1101/2020.04.27.063719)
+
+

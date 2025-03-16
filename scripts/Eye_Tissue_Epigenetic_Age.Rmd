@@ -1,0 +1,139 @@
+---
+title: "Epigenetic Age in Eye Tissue"
+author: "Kendrix"
+date: "12/1/2020"
+output:
+  html_document:
+      highlight: pygments
+      theme: united
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Aim: To test the feasibility of testing the epigenetic clocks on the eye tissue using all publicly available control eye datasets.
+
+Pre-processing script adapted from Chaini Konwar.
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(GEOquery)
+library(RCurl)
+library(GEOmetadb)
+library(dendextend)
+library(ArrayExpress)
+library(methylumi)
+library(lumi)
+library(lattice)
+library(gplots)
+library(RColorBrewer)
+library(limma)
+library(ROC)
+library(matrixStats)
+library(reshape)
+library(sva)
+library(grid)
+library(gridExtra)
+library(ape)
+library(Hmisc)
+library(RCurl)
+library(wateRmelon)
+library(minfiData)
+library(minfi)
+library(robustHD)
+library(ewastools)
+library(omicsPrint)
+library(doParallel)
+library(jcolors)
+library(plyr)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+library(FlowSorted.Blood.EPIC)
+library(FlowSorted.Blood.450k)
+library(FlowSorted.CordBloodCombined.450k)
+library(Biobase)
+library(data.table)
+library(factoextra)
+library(Metrics)
+library(quantro)
+library(impute)
+
+setwd("~/KoborLab/kobor_space/kendrix/macular_degeneration/")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##1.0 Data exploration and object creation
+
+
+###1.1 Download eye datasets from public databases.
+
+Using all publicly eye dataset, combine all eye samples into a single large dataset.
+
+As of Dec 2020, 
+
+- There are 6 methylation by microarray datasets in GEO, 4 are cell lines and 2 are usable datasets that are also available in ArrayExpress. They are listed below. 
+
+- There are 2 methylation by microarray datasets in ArrayExpress, which are similar to the ones in GEO. 
+
+
+Datasets used:
+**GEO**: GSE102952, GSE57362
+**ArrayExpress**: E-MTAB-7183
+
+Exclusion criteria: Samples with retinal diseases.
+
+
+```{r}
+#GEO dataset: GSE102952
+
+#Download supplementary data.
+getGEOSuppFiles("GSE102952", fetch_files = TRUE, baseDir = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/")
+untar("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952/GSE102952_RAW.tar", exdir = "/home/BCRICWH.LAN/kendrix.kek/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952/")
+file.remove("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952/GSE102952_RAW.tar")
+
+#Download GSE102952 dataset.
+Oliver_AMD <- getGEO("GSE102952", GSEMatrix = TRUE, destdir = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952")
+show(Oliver_AMD)
+
+#Unzip all files in the folder.
+head(list.files("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952", pattern = ".gz$"))
+suppFiles <- list.files("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952", pattern = "gz$", full = TRUE)
+sapply(suppFiles, gunzip, overwrite = TRUE)
+
+#Get pData table.
+Oliver_AMD.pData <- pData(phenoData(Oliver_AMD[[1]]))
+
+
+#Get beta matrix.
+Oliver_AMD.betas <- read.table("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/GSE102952/GSE102952_series_matrix.txt", header = TRUE, fill = TRUE, skip = 63, stringsAsFactors = FALSE)
+rownames(Oliver_AMD.betas) <- Oliver_AMD.betas$ID_REF
+Oliver_AMD.betas <- Oliver_AMD.betas[,-1]
+
+#Make sample names consistent. 
+identical(rownames(Oliver_AMD.pData), colnames(Oliver_AMD.betas)) #TRUE.
+colnames(Oliver_AMD.pData)[1] <- "Sample_Name"
+
+#Fix sample names of pData and beta matrix.
+rownames(Oliver_AMD.pData) <- Oliver_AMD.pData$Sample_Name
+colnames(Oliver_AMD.betas) <- Oliver_AMD.pData$Sample_Name
+identical(rownames(Oliver_AMD.pData), colnames(Oliver_AMD.betas)) #TRUE. 
+
+#Check for NAs and infinite values.
+sum(is.na(Oliver_AMD.betas)) #1.
+```
+
+
+
+

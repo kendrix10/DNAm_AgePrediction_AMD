@@ -1,0 +1,1208 @@
+---
+title: "Validate E-MTAB-7183 AMD Eye Hits"
+author: "Kendrix"
+date: '2020-09-26'
+output: 
+  html_document:
+    highlight: pygments
+    theme: united
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Aim: To validate AMD-associated hits that found by [Porter et al.](https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-019-0608-2#rightslink).
+
+Pre-processing script adapted from Chaini Konwar.
+
+---------------------------------------------------------------------------------------------------------------------------
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(GEOquery)
+library(RCurl)
+library(GEOmetadb)
+library(dendextend)
+library(ArrayExpress)
+library(methylumi)
+library(lumi)
+library(lattice)
+library(gplots)
+library(RColorBrewer)
+library(limma)
+library(ROC)
+library(matrixStats)
+library(reshape)
+library(sva)
+library(grid)
+library(gridExtra)
+library(ape)
+library(Hmisc)
+library(RCurl)
+library(wateRmelon)
+library(minfiData)
+library(minfi)
+library(robustHD)
+library(ewastools)
+library(omicsPrint)
+library(doParallel)
+library(jcolors)
+library(plyr)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+library(FlowSorted.Blood.EPIC)
+library(FlowSorted.Blood.450k)
+library(FlowSorted.CordBloodCombined.450k)
+library(Biobase)
+library(data.table)
+library(factoextra)
+library(Metrics)
+library(quantro)
+library(impute)
+
+setwd("~/KoborLab/kobor_space/kendrix/macular_degeneration/")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##Data exploration and object creation
+
+
+###Step 1: Explore data downloaded from ArrayExpress.
+
+The data used here comes from [Whole-genome methylation profiling of the retinal pigment epithelium of individuals with age-related macular degeneration reveals differential methylation of the SKI, GTF2H4, and TNXB genes by *Porter et al.*](https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-019-0608-2#rightslink).
+
+The authors made the dataset publicly available in ArrayExpress with the Accession number: E-MTAB-7183.
+
+The dataset consists of ocular tissue (pigmented layer of retina) from 25 AMD samples (21 level 2 AMD and 4 level 3 AMD) and 19 controls.
+
+The age ranges from 50 years old to 89 years old, and the sex distribution is as follows: Male (27), Female (17).
+
+```{r, results='hide'}
+#Explore metadata.
+AMD_meta <- read.table("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/E-MTAB-7183_meta.txt", sep = "\t", header = TRUE)
+colnames(AMD_meta)[1] <- "Sample_Name"
+colnames(AMD_meta)[3] <- "Sex"
+colnames(AMD_meta)[4] <- "Age"
+colnames(AMD_meta)[6] <- "Tissue"
+colnames(AMD_meta)[7] <- "Disease_state"
+colnames(AMD_meta)[17] <- "Assay_name"
+
+AMD_meta$Sex <- gsub("male", "M", gsub("female", "F", AMD_meta$Sex)) #Changed for easier comparison with minfi sex prediction. 
+
+#Create samplesheet.
+AMD_samplesheet <- AMD_meta[, c("Sample_Name", "Disease_state", "Assay_name", "Sex", "Age", "Tissue")]
+colnames(AMD_samplesheet)[2] <- "Sample_Group"
+AMD_samplesheet$Assay_name <- gsub("_Grn", "", gsub("_Red", "", AMD_samplesheet$Assay_name))
+AMD_samplesheet <- separate(AMD_samplesheet, col = "Assay_name", sep = "_", into = c("Sentrix_ID", "Sentrix_Position"))
+
+duplicated(AMD_samplesheet) #The samplesheet contains duplicated samples. 
+AMD_samplesheet <- AMD_samplesheet[duplicated(AMD_samplesheet),] #Remove duplicated samples. 
+```
+
+```{r, eval=FALSE}
+write.csv(AMD_samplesheet, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/idats/AMD_project/AMD_samplesheet.csv", row.names = FALSE)
+```
+
+
+###Step 2: Create ExtendedRGSet object.
+
+```{r, results='hide', message=FALSE}
+path = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/idats/AMD_project"
+targets <- read.metharray.sheet(path) #Tells R to look for sample sheet within the folder. 
+baseDir <- system.file(path, package = "minfiData") 
+baseDir #baseDir determines the array chip position and ID.
+sub(baseDir, "", targets$Basename) #The class of RGSet is an RGChannelSet object. This is the initial object of a minfi analysis that contains the raw intensities in the green and red channels. Note that this object contains the intensities of the internal control probes as well.
+
+#Create Extended RGSet object.
+AMD_ExtendedRGSet <- read.metharray.exp(targets = targets, extended = TRUE, verbose = TRUE)
+AMD_ExtendedRGSet
+```
+
+```{r}
+sampleNames(AMD_ExtendedRGSet) == paste0(AMD_samplesheet$Sentrix_ID, "_", AMD_samplesheet$Sentrix_Position) #Check order of sampleNames in RGSet and samplesheet to change sampleNames in RGSet. Proceed ONLY if all is TRUE. 
+sampleNames(AMD_ExtendedRGSet) <- AMD_samplesheet$Sample_Name #Change sampleNames of AMD_ExtendedRGSet.
+identical(sampleNames(AMD_ExtendedRGSet), rownames(pData(AMD_ExtendedRGSet))) #Confirm sample orders in pData.
+identical(sampleNames(AMD_ExtendedRGSet), colnames(getBeta(AMD_ExtendedRGSet))) #Confirm sample orders in beta matrix. 
+```
+
+```{r, eval=FALSE}
+save(AMD_ExtendedRGSet, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_ExtendedRGSet.RData")
+```
+
+
+###Step 3: Create ewastools object.
+
+```{r}
+#Create ewastools sampleInfo sheet.
+AMD_sampleInfo <- AMD_meta[,c("Sample_Name", "Disease_state", "Assay_name", "Sex", "Age", "Tissue")]
+AMD_sampleInfo$Assay_name <- gsub("_Red", "", gsub("_Grn", "", AMD_sampleInfo$Assay_name))
+AMD_sampleInfo <- unique(AMD_sampleInfo) #Remove duplicates. 
+path <- "/home/BCRICWH.LAN/kendrix.kek/KoborLab/kobor_space/kendrix/macular_degeneration/data/idats/AMD_project/"
+AMD_sampleInfo$Assay_name <- paste0(path, AMD_sampleInfo$Assay_name)
+meth <- read_idats(AMD_sampleInfo$Assay_name, quiet = TRUE)
+
+rm(AMD_meta) #Remove original meta file. 
+```
+
+```{r, eval=FALSE}
+save(AMD_sampleInfo, meth, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_ewastools_object.RData")
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##Quality Control - Sample Filtering
+
+
+###Step 1: Load objects.
+
+```{r}
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_ExtendedRGSet.RData")
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_ewastools_object.RData")
+
+AMD_samplesheet <- read.csv("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/idats/AMD_project/AMD_samplesheet.csv", header = TRUE)
+```
+
+
+###Step 2: Detection p-value.
+
+It is worth checking the quality of the samples to see if they are true signals and are not conflated with background noise. One way to do so is by determining the detection p-values of the samples to parse out true methylation signals. Detection p-values by definition are measures that differentiate sample signal from background noise (which is estimated using the negative probes of the array). By default, the threshold for significant detection p-value is set at 0.01. Samples that are above the p-value threshold are considered statistically poor and should be removed (i.e. samples with high detection p-value should be discarded because they were detected with **low signal-to-noise ratio of fluorescence intensities**).
+
+The minfi package provides a function, detectionP() to determine detection p-values for each methylation region across samples using the negative control probes in the array that are designed to NOT target the human genome. The probe sequences are propriety and are suggested to feature very low intensities (Heiss & Just (2019)).
+
+NOTE: No samples above detection p-value of 0.01. All samples passed. 
+
+```{r, fig.align='center'}
+detp_minfi <- minfi::detectionP(AMD_ExtendedRGSet) #Detection p-value distinguishes signal from background noise with a single cut-off.
+head(detp_minfi)[,1:5]
+
+#Examine mean detection p-values across all samples to identify any failed samples.
+plot(colMeans(detp_minfi), ylim = c(0.00002, 0.05), xaxt = 'n', ann = FALSE, pch = 20, col = "black", cex = 1) + 
+  mtext(side = 1, line = 0.5, "Samples", font = 1, cex = 1) + 
+  mtext(side = 2, line = 2, "Mean detection p-values", font = 1, cex = 1) + 
+  abline(h = 0.01, col = "red") + 
+  text(colMeans(detp_minfi), labels = AMD_ExtendedRGSet$Sample_Name, cex = 0.5, font = 2, pos = 2)
+```
+
+Heiss and Just recommends using the non-specific fluorescence intensities to estimate the background signal, which is a more accurate and stringent method without needing to set an extreme detection p-value cut-off. They imply that this method not only "protect against false-positive findings" but "against false-negative findings as well". They show that their method calls almost all Y-chromosome probes among males, but classifies most Y-chromosome probes in females as undetected using the 0.01 cut-off, which is the intended outcome as females possess XX chromosomes and should not have any signal detected in Y-chromosomes. They also show similar results detected using the negative control probes, but with a more extreme cut-off and more samples filtered (> 1e-40).
+
+NOTE: No samples above detection p-value of 0.01. All samples passed.
+
+```{r, fig.align='center'}
+detp_ewastools <- ewastools::detectionP(meth) #Detection p-value distinguishes signal from background noise with a single cut-off.
+detp <- as.data.frame(detp_ewastools$detP)
+head(detp)[,1:5]
+colnames(detp) <- colnames(getBeta(AMD_ExtendedRGSet))
+rownames(detp) <- meth$manifest$probe_id
+
+#Examine mean detection p-values across all samples to identify any failed samples.
+plot(colMeans(detp, na.rm = TRUE), ylim = c(0.00002, 0.05), xaxt = 'n', ann = FALSE, pch = 20, col = "black", cex = 1) + 
+  mtext(side = 1, line = 0.5, "Samples", font = 1, cex = 1) + 
+  mtext(side = 2, line = 2, "Mean detection p-values", font = 1, cex = 1) + 
+  abline(h = 0.01, col = "red") + 
+  text(colMeans(detp, na.rm = TRUE), labels = colnames(detp), cex = 0.5, font = 2, pos = 2)
+```
+
+
+###Step 3: Beadcount.
+
+For each probe sequence in the 450K array, a median of 14 beads is randomly distributed on the array. Each of these beads contains hundreds of thousands of oligonucleotides. This provides a unique set of internal technical replication on each array. This step is done to remove probes that are not represented by a minimum of 3 beads on the array, which is important to correct for positional effects (i.e. the effects where the same sample in different physical positions on the array could be measured as different methylation levels).
+
+Probes that are not represented by a minimum of 3 beads on the array are designated as NA with the beadcount() function.
+
+NOTE: All samples passed. 
+
+```{r, fig.align='center'}
+#Calculate the number of samples with bead count <3 for each probe in a matrix of bead count values.
+bead <- beadcount(AMD_ExtendedRGSet)
+colnames(bead) <- gsub('X', '', colnames(bead))
+
+AMD_samplesheet <- AMD_samplesheet %>% mutate(Beadcount = colSums(is.na(bead)))
+
+AMD_samplesheet %>% 
+  mutate(Sample_Name = factor(as.character(Sample_Name), levels = Sample_Name)) %>%
+  ggplot(aes(x = Sample_Name, y = Beadcount)) +
+  geom_point(alpha = 0.7, color = 'black') + 
+  geom_hline(yintercept = 0.01*nrow(bead), linetype = 'dashed', color = 'green') +
+  geom_text(aes(x = 0, y = 0.01*nrow(bead)), 
+            label = '1%', vjust = -0.5, hjust = -0.5, color = 'green')+
+  scale_y_continuous(limits = c(0, 12500), breaks = seq(0, 12500, 2500)) +
+  labs(x = 'Samples', y = '', title = '# Samples with probes with bead count < 3') +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) 
+```
+
+```{r}
+save(detp_minfi, bead, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_detp_beadcount_QC.RData")
+```
+
+
+###Step 4: Log median intensity of methylated and unmethylated channels.
+
+minfi package provides a simple quality control plot that uses the log median intensity in both the methylated (M) and unmethylated (U) channels. When plotting these two medians against each other, it has been observed that good samples cluster together with higher median intensities, while failed samples tend to separate and have lower median intensities.
+
+NOTE: All samples passed. 
+
+```{r, fig.align='center'}
+AMD_MSet <- preprocessRaw(AMD_ExtendedRGSet) #Get MSet object from RGSet.
+head(getMeth(AMD_MSet)[,1:3])
+head(getUnmeth(AMD_MSet)[,1:3])
+
+AMD_QC <- getQC(AMD_MSet)
+head(AMD_QC)
+plotQC(AMD_QC)
+```
+
+
+###Step 5: Control metrics.
+
+Quality control metrics are examined to determine the success of the bisulphite conversion and subsequent array hybridisation. This check uses the Illumina’s 636 control probes to assess technical parameters including array staining, extension, hybridization, target removal, specificity, and bisulfite conversion.
+
+NOTE: All samples passed control metrics. 
+
+```{r}
+ctrls <- control_metrics(meth)
+# A logical vector of passed/failed is returned by sample_failure() which compares all 17 metrics against the thresholds recommended by Illumina.
+
+AMD_sampleInfo$failed <- as.data.frame(sample_failure(ctrls))
+table(AMD_sampleInfo$failed) #If AMD_sampleInfo$failed == FALSE, all samples PASS.
+
+failed_control_metrics <- AMD_sampleInfo[AMD_sampleInfo$failed == TRUE, "Sample_Name"] #Check the sample names for the ones that fail control metrics.
+failed_control_metrics #No failed samples. 
+
+#Summary of control metrics.
+control_metrics_all <- as.data.frame(ctrls)
+control_metrics_all$Sample_Name <- AMD_sampleInfo$Sample_Name
+head(control_metrics_all)
+sapply(control_metrics_all, function(x) sum(is.na(x)))
+```
+
+```{r, fig.align='center'}
+stripchart(ctrls$`Bisulfite Conversion II`, method = "jitter", pch = 4, xlab = 'Bisulfite Conversion II', xlim = c(0,20)) + 
+  abline(v = 1, col = 2, lty = 3) +
+  text(ctrls$`Bisulfite Conversion II`[ctrls$`Bisulfite Conversion II` < 1], 1.2, labels = ctrls$Sample_Name[ctrls$`Bisulfite Conversion II` < 1], srt = 45)
+```
+
+or
+
+```{r, fig.align='center'}
+controlStripPlot(AMD_ExtendedRGSet, controls = c("BISULFITE CONVERSION I", "BISULFITE CONVERSION II"))
+```
+
+
+###Step 6: Contamination check.
+
+The 450K BeadChip also features 65 control probes which assay highly-polymorphic single nucleotide polymorphisms (SNPs) rather than DNA methylation. These are included on the array to allow sample quality control to check for relatedness between individuals and enable the detection of potential sample mix-ups. The signal from these probes is expected to cluster into three distinct groups (representing the heterozygous and two homozygous groups). The snp_outliers function however computes the average log odds from the 65 posterior probabilities from a mixture model to capture how irregular the SNP betas are, i.e. how much they deviate from the ideal trimodal distribution. Although these are not DNA methylation signals, they could be used to provide an indication of the degree of technical variance between samples. 
+
+NOTE: All samples passed. 
+
+```{r, fig.align='center'}
+#While ewastools implements the LOESS normalization (Heiss and Brenner, 2015), the developers of the package says not use the normalization "as it does little to protect against batch effects but can result in the removal of genuine biological signal". They recommend to adjust for relevant technical covariates in regression models later.
+
+beta <- dont_normalize(meth)
+
+#Pulling SNP probes.
+snps <- meth$manifest[probe_type == "rs", index]
+snps <- beta[snps,]
+
+#These SNPs are then used as input for call_genotypes(). This function estimates the parameters of a mixed model consisting of three beta distributions representing one heterozygous and the two homozygous genotypes. There is also a fourth component, shown as a uniform distribution that represents outliers. The functions returns posterior probabilities used for soft classification. 
+#In simple words, we are determining the probability for every SNP whether they belong to 1 of 4 different distributions - 3 of which correspond to the 3 expected genotypes (AA, AB, BB), and the 4th distribution corresponds to outside/in-between these expected genotype distributions. SNPs with a higher probability of belonging to this 4th distribution indicate mixing between more than one genotype.
+
+#Fit mixed model to call genotypes.
+genotypes_called <- call_genotypes(snps, learn = T)
+
+#Call genotype clusters.
+AMD_samplesheet <- AMD_samplesheet %>% 
+  mutate(genotype_cluster = as.factor(enumerate_sample_donors(genotypes_called)))
+
+#Examine probability outlier.
+plot(snp_outliers(genotypes_called) %>% sort, ylab = "SNP Outliers")
+
+#Overall distribution of the genotypes.
+ewastools:::mxm_(genotypes_called)
+```
+
+We see 3 peaks, corresponding to 3 possible genotypes.
+
+```{r, fig.align='center'}
+#Check the average probability of SNP not belonging to any of the 3 genotypes (coloured by Sex).
+AMD_samplesheet <- AMD_samplesheet %>% 
+  mutate(Prob_SNP_outlier = colMeans(genotypes_called$outliers, na.rm = T),
+         Prob_SNP_outlier_Logodds = snp_outliers(genotypes_called))
+  
+  ggplot(AMD_samplesheet, aes(x = Sample_Name, y = Prob_SNP_outlier, fill = Sex)) +
+  geom_point(shape = 21, size = 2.5, alpha = 0.8, col = "black") + 
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  labs(x = 'Samples', y = "Probability", 
+       title = 'Average probability of SNP being an outlier') +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  scale_x_discrete(breaks = NULL, expand = c(0.02, 0.02))
+```
+
+The Y-axis denotes the average probability of SNP being an outlier. No sample appears to be > 0.1 probability, indicating that there is minimal probability of the presence of outlier.
+
+```{r, fig.align='center'}
+#Look at the raw distribution
+snp_betas <- getSnpBeta(AMD_ExtendedRGSet)
+snp_betas_melt <- t(snp_betas) %>% as_tibble %>% mutate(Sample_Name = colnames(snp_betas)) %>%
+  left_join(AMD_samplesheet %>% select(Sample_Name, Sex), by = 'Sample_Name') %>%
+  gather(key = 'SNP', value = 'Beta', -Sample_Name, -Sex)
+
+ggplot(snp_betas_melt, aes(x = SNP, y = Beta, fill = Sex)) +
+  geom_point(shape = 21, size = 2.5, alpha = 0.8, col = "black") + 
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  labs(x = '59 SNPs') + theme_bw() + theme(axis.text.x = element_blank()) +
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  scale_x_discrete(breaks = NULL, expand = c(0.02, 0.02))
+```
+
+
+###Step 7: Data linkage errors and Sample relations detection.
+
+omicsPrint (Van Iterson et al. 2018) is a package developed to detect data linkage errors through inspecting sample relations in multiple omics studies. Included with the package is the hm450.manifest.pop.GoNL data, which stores SNP probe information in a GRanges class object. This is then used to create a subset of the beta values for genotyping. The function beta2genotype() then genotypes the observations by measuring homozygous or heterozygous alleles at these SNP probes. Lastly alleleSharing() assesses the relationships between different individuals, which can be unrelated, twins, or identical. The results can then be visualised using the inferRelations() function. In the data with sample relationships, this would be shown in the above graph as green or black clusters (Van Iterson et al. 2018). It is important to carry out this type of visualization before probe-filtering as otherwise the genotyping will be based on very few SNPs.
+
+NOTE: No mismatches found. 
+
+```{r, fig.align='center'}
+data(hm450.manifest.pop.GoNL)
+
+betas.swan <- getBeta(AMD_ExtendedRGSet)
+
+cpgs <- names(hm450.manifest.pop.GoNL[mcols(hm450.manifest.pop.GoNL)$MASK.snp5.EAS])
+cpgs <- na.omit(match(cpgs, rownames(betas.swan)))
+omicsBetas <- betas.swan[cpgs,]
+omicsBetas[1:10, 1:2]
+
+dnamCalls <- beta2genotype(omicsBetas, assayName = "exprs")
+dim(dnamCalls)
+dnamCalls[1:10, 1:2]
+
+omicsData <- alleleSharing(dnamCalls, verbose = TRUE)
+mismatches <- inferRelations(omicsData)
+dim(mismatches)
+```
+
+
+###Step 8: Sample identity. 
+
+Hierarchical clustergram across all samples cluster similar samples together while samples that are different from all the other samples are pulled down as outliers. 
+
+NOTE: No obvious sample that is pulled down as outlier.
+
+```{r, fig.align='center'}
+#Use SNP probes to infer identity and see how they cluster. 
+snp_betas <- getSnpBeta(AMD_ExtendedRGSet)
+
+identity_dendo <- dist(t(snp_betas))
+clust <- hclust(identity_dendo)
+dendo <- as.dendrogram(clust)   
+
+dendo %>% dendextend::set("labels_cex", 0.6) %>% 
+  hang.dendrogram %>% plot()
+```
+
+
+###Step 9: Outlier detection.
+
+The outlyx function takes any beta matrix (preferably raw) and will identify any samples that are inconsistent with the rest of the data. From the plot, we can observe that any data points that fall into the red squares are indeed outlying and should be removed from analysis.
+
+To confirm the previous identity dendrogram with no obvious outliers, I run the chunk below to see if there are any sample that falls within the two red squares in the plot.
+
+NOTE: No samples fall into the red squares, so no outlier confirmed.
+
+```{r, fig.align='center'}
+betas.swan <- getBeta(AMD_ExtendedRGSet)
+detout <- outlyx(betas.swan)
+
+detout$Sample_Name <- rownames(detout)
+detout[which(detout$outliers == T),]
+```
+
+
+###Step 10: Sex check.
+
+minfi has a sex predictor function that uses the median values of measurements on the X and Y chromosomes respectively. If yMed - xMed is less than cutoff of -2, the sample is predicted as female; otherwise it is predicted as male.
+
+```{r, fig.align='center'}
+#Get MSet object.
+AMD_MSet <- preprocessRaw(AMD_ExtendedRGSet)
+
+#Sex prediction using minfi's getSex() function. 
+AMD_gRSet <- mapToGenome(AMD_MSet) #Convert to GenomicMethylSet object. 
+predSex <- getSex(AMD_gRSet)
+head(predSex)
+
+#Compare to Sex from metadata. 
+AMD_samplesheet$Sex <- as.factor(AMD_samplesheet$Sex)
+predSex$predictedSex <- as.factor(predSex$predictedSex)
+all.equal(AMD_samplesheet$Sex, predSex$predictedSex) #TRUE.
+
+#Plot predicted sex against reported sex from metadata.
+predictedSex <- as.data.frame(predSex)
+ggplot(predictedSex, aes(x = xMed, y = yMed, fill = AMD_samplesheet$Sex)) +
+  geom_point(shape = 21, size = 3, alpha = 0.8, col = "black") +
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  theme_classic() +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none")
+```
+
+The sex of the samples cluster accordingly.
+
+ewastools has a similar sex predictor function that computes for each sample the average total intensities of all probes targeting either chromosome, X and Y respectively (There are 11,232 probes that target the X chromosome and 413 probes that target the Y chromosome). This function exploits the natural difference in allosomal (sex) copy number (with females having more copy number than males) and the fact that total intensity (U + M) is sensitive to copy number variation to detect sex mismatches. The threshold to discriminate between both sexes is determined by the Hodges-Lehmann estimator (i.e. median of all pairwise male/female averages) for X and Y chromosomes separately. The dotted lines in the figure below represent the Hodges-Lehman estimators separating the male and female cluster centres. The male samples should cluster in the top left quadrant while the female samples should cluster in the bottom right quadrant. The samples that fall in the top right and bottom left quadrants are considered "unclear" (Heiss & Just 2018).
+
+It is suggested that this approach is more robust than minfi’s getSex() function due to its potential to detect sex mismatches and allosomal outliers.
+
+```{r, fig.align='center'}
+#Sex prediction using ewastools' check_sex() function. 
+predicted_sex <- check_sex(meth)
+AMD_samplesheet <- AMD_samplesheet %>% mutate(normalized_X_intensity = predicted_sex$X,
+                        normalized_Y_intensity = predicted_sex$Y)
+
+#Sex plot.
+ggplot(AMD_samplesheet, aes(x = normalized_X_intensity, y = normalized_Y_intensity, fill = Sex)) +
+  geom_point(shape = 21, size = 3, alpha = 0.8, col = "black") + theme_classic() +
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  geom_text_repel(data = AMD_samplesheet %>% filter(Sex == 'M', normalized_X_intensity > 0.95,
+                                         normalized_Y_intensity < 0.5), 
+                  aes(label = Sample_Name), size = 3, force = 15, nudge_x = -0.1, nudge_y = -0.1) +
+  geom_hline(yintercept = 0.5, linetype = 'dashed', col = '#bd7b9f') + 
+  geom_vline(xintercept = 0.95, linetype = 'dashed', col = '#2c7dab') +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none")
+```
+
+This second check confirms no sex mismatches in the samples.
+
+
+###Step 11: Post sample filtering PCA.
+
+Code from Nicole Gladish, Rachel Edgar and Sumaiya Islam.
+
+Location: ~/KoborLab/kobor_space/shared_coding_resource/PCA Code.Rmd
+
+```{r}
+betas.swan <- getBeta(AMD_ExtendedRGSet) #Essentially use your mvalue matrix.
+meta <- pData(AMD_ExtendedRGSet)
+PCA_full <- princomp(na.omit(betas.swan)) #You can't have NAs in your dataframe - make sure to either remove probes with a lot of NAs and/or have imputed values. Can run na.omit but depending on the stage of pre-processing, could result in a lot of probes to be removed and a very inaccurate PCA.
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance <- vars/sum(vars)
+adjust <- 1-Importance[1]
+pca_adjusted <- Importance[2:length(Importance)]/adjust
+pca_df <- data.frame(adjusted_variance = pca_adjusted, PC = seq(1:length(pca_adjusted)))
+
+#Restructure meta so that variables are in the appropriate format - categorical variables (sex is commonly labelled as 0 and 1) are factors and not numeric for example.
+
+colnames(meta)[6] <- "Sentrix_Position"
+colnames(meta)[7] <- "Sentrix_ID"
+
+meta$Sentrix_ID <- as.factor(meta$Sentrix_ID)
+meta$Sentrix_Position <- as.factor(meta$Sentrix_Position)
+meta$Sex <- as.factor(meta$Sex)
+meta$Sample_Group <- as.factor(meta$Sample_Group)
+meta$Age <- as.numeric(meta$Age)
+
+colnames(meta) #Obtain the column numbers to include.
+meta_categorical <- data.frame(meta[, c(2,3,6,7)])  #Input column numbers in meta that contain categorical variables.
+meta_continuous <- data.frame(meta[,4])  #Input column numbers in meta that contain continuous variables.
+colnames(meta_categorical) #Write the line below to ensure you're changing the names of your variables in the right order.
+colnames(meta_categorical) <- c("Disease state", "Sex", "Position", "Chip")
+colnames(meta_continuous)
+colnames(meta_continuous) <- c("Age")
+
+Order <- c(seq(1:sum(ncol(meta_categorical), ncol(meta_continuous))))
+Num <- 16 #This number will depend on your dataset - if you only have 6 samples, you should probably only show 5 PCs or less.
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.height=7, fig.width=8}
+#Run PCA.
+source("~/KoborLab/kobor_space/kendrix/R_Functions/heat_scree_plot.R", local = knitr::knit_global())
+heat_scree_plot(Loadings, Importance, Num, Order)
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##Normalisation
+
+
+###Step 1: Visualise pre-normalised distribution of beta values.
+
+```{r, fig.align='center'}
+AMD_MSet <- preprocessRaw(AMD_ExtendedRGSet) #Get MSet object from RGSet.
+plotBetasByType(AMD_MSet[,1])
+```
+
+
+###Step 2: Perform SWAN normalisation.
+
+Subset-quantile within array normalization (SWAN) (Jovana Maksimovic, Lavinia Gordon, and Alicia Oshlack 2012) is a within-array normalization correction for the technical differences between the Type I and Type II array designs. The algorithm matches the beta-value distributions of the Type I and Type II probes by applying a within-array quantile normalization separately for different subsets of probes (divided by CpG content).
+
+```{r, fig.align='center'}
+AMD_MSet <- preprocessRaw(AMD_ExtendedRGSet) #Get MSet object from RGSet.
+
+#SWAN uses a random subset of probes to do the between array normalization. In order to achive reproducible results, the seed needs to be set using set.seed.
+set.seed(100)
+
+#Perform SWAN normalisation.
+AMD_MSet.swan <- preprocessSWAN(AMD_ExtendedRGSet, mSet = AMD_MSet)
+
+#Plot to visualise post-normalisation distribution.
+plotBetasByType(AMD_MSet.swan[,1])
+```
+
+```{r, eval=FALSE}
+save(AMD_MSet.swan, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_MSet.swan.RData")
+```
+
+
+###Step 3: Post-normalisation PCA. 
+
+The publication uses SWAN normalisation.
+
+```{r}
+#Load the normalised beta matrix of choice.
+betas.swan <- getBeta(AMD_MSet.swan)
+meta <- as.data.frame(pData(AMD_MSet.swan))
+
+identical(rownames(meta), colnames(betas.swan)) #TRUE.
+
+PCA_full <- princomp(betas.swan) #You can't have NAs in your dataframe - make sure to either remove probes with a lot of NAs and/or have imputed values. Can run na.omit but depending on the stage of pre-processing, could result in a lot of probes to be removed and a very inaccurate PCA.
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance <- vars/sum(vars)
+adjust <- 1-Importance[1]
+pca_adjusted <- Importance[2:length(Importance)]/adjust
+pca_df <- data.frame(adjusted_variance = pca_adjusted, PC = seq(1:length(pca_adjusted)))
+
+#Restructure meta so that variables are in the appropriate format - categorical variables (sex is commonly labelled as 0 and 1) are factors and not numeric for example.
+
+colnames(meta)[6] <- "Sentrix_Position"
+colnames(meta)[7] <- "Sentrix_ID"
+
+meta$Sentrix_ID <- as.factor(meta$Sentrix_ID)
+meta$Sentrix_Position <- as.factor(meta$Sentrix_Position)
+meta$Sex <- as.factor(meta$Sex)
+meta$Sample_Group <- as.factor(meta$Sample_Group)
+meta$Age <- as.numeric(meta$Age)
+
+colnames(meta) #Obtain the column numbers to include.
+meta_categorical <- data.frame(meta[, c(2,3,6,7)])  #Input column numbers in meta that contain categorical variables.
+meta_continuous <- data.frame(meta[,4])  #Input column numbers in meta that contain continuous variables.
+colnames(meta_categorical) #Write the line below to ensure you're changing the names of your variables in the right order.
+colnames(meta_categorical) <- c("Disease state", "Sex", "Position", "Chip")
+colnames(meta_continuous)
+colnames(meta_continuous) <- c("Age")
+
+Order <- c(seq(1:sum(ncol(meta_categorical), ncol(meta_continuous))))
+Num <- 16 #This number will depend on your dataset - if you only have 6 samples, you should probably only show 5 PCs or less.
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.height=7, fig.width=8}
+#Run PCA.
+source("~/KoborLab/kobor_space/kendrix/R_Functions/heat_scree_plot.R", local = knitr::knit_global())
+heat_scree_plot(Loadings, Importance, Num, Order)
+```
+
+
+###Step 4: Sanity check.
+
+```{r, fig.align='center'}
+#Get raw betas to compare.
+betas.raw <- getBeta(AMD_ExtendedRGSet)
+
+#Check sample order for sample-sample correlation.
+identical(rownames(betas.raw), rownames(betas.swan)) #FALSE.
+identical(colnames(betas.raw), colnames(betas.swan)) #TRUE.
+
+#Reorder probe order.
+betas.raw <- betas.raw[order(rownames(betas.raw)),]
+betas.swan <- betas.swan[order(rownames(betas.swan)),]
+
+#Recheck sample order for sample-sample correlation.
+identical(rownames(betas.raw), rownames(betas.swan)) #TRUE.
+identical(colnames(betas.raw), colnames(betas.swan)) #TRUE.
+
+#Sample-sample correlation. 
+cor.raw_swan <- cor(betas.raw, betas.swan, use = "pairwise.complete.obs") #Input: Beta values to compare. 
+plot(xaxt = "n", ylim = c(0.95, 1), xlab = "", ylab = "", diag(cor.raw_swan), main = "Sample-sample correlation", pch = 16, panel.first = grid()) +
+axis(1, 1:44, labels = rownames(cor.raw_swan), las = 3, cex.axis = 0.8)
+
+#Difference in beta values before and after normalisation.
+diff = betas.swan - betas.raw
+hist(diff, cex.axis = 0.8, breaks = 100, xlab = "", ylab = "", xlim = c(-0.8, 0.8), las = 1, main = "Difference in beta values before and after normalisation")
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##Quality Control - Probe Filtering
+
+###Step 1: Load SWAN-normalised objects.
+
+```{r}
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_MSet.swan.RData")
+```
+
+
+###Step 2: Sex probes removal.
+
+Probes that target the sex chromosomes are removed as both males and females have unequal amount X chromosomes - with females having twice the amount of X chromosomes as compared to males. So they need to be removed so that the analysis is not skewed on the basis of this disproportionate natural difference in chromosomal number. 
+
+```{r}
+data(IlluminaHumanMethylation450kmanifest)
+data(Locations)
+
+#Check probe count before removal.
+dim(AMD_MSet.swan) #485512 probes.
+
+#Get sex probes information from manifest file.
+sex_probes <- Locations[which(Locations$chr == "chrY" | Locations$chr == "chrX"), ] %>% as.data.frame() 
+dim(sex_probes) #19627 probes.
+
+#Check the number of sex probes in the beta matrix.
+AMD_sex_probes <- AMD_MSet.swan[which(rownames(AMD_MSet.swan) %in% rownames(sex_probes)),]
+dim(AMD_sex_probes) #10583 probes.
+
+#Remove sex probes from AMD beta matrix.
+AMD_MSet.swan <- AMD_MSet.swan[!(rownames(AMD_MSet.swan)%in%rownames(sex_probes)),]
+dim(AMD_MSet.swan) #474929 probes remaining after sex probes filtering. 
+```
+
+
+###Step 3: Cross-reactive probes removal. 
+
+Porter et al. uses [Chen et al.'s annotation](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3592906) to remove cross-reactive and polymorphic probes, which is why I'm replicating this step here. 
+
+```{r}
+#Load cross-reactive probes.
+cross.react <- read.csv("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/Non_specific_probes_450K.csv", header = TRUE, as.is = TRUE)
+cross.react.probes <- as.character(cross.react$TargetID)
+
+#Check the number of cross-reactive probes in the beta matrix.
+AMD_cross.react_probes <- AMD_MSet.swan[which(rownames(AMD_MSet.swan) %in% cross.react.probes),]
+dim(AMD_cross.react_probes) #28379 probes.
+
+#Remove cross-reactive probes from AMD beta matrix.
+AMD_MSet.swan <- AMD_MSet.swan[!(rownames(AMD_MSet.swan) %in% cross.react.probes),]
+dim(AMD_MSet.swan) #446550 probes remaining after sex probes filtering. 
+```
+
+
+###Step 4: Detection p-value and beadcount.
+
+```{r}
+#Filter probes that have detection p-value thresholds of more than 0.01.
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_detp_beadcount_QC.RData")
+
+#Create a dummy matrix
+bad_probes <- matrix(data = F, nrow = nrow(detp_minfi), ncol = ncol(detp_minfi),
+                        dimnames = list(rownames(detp_minfi), colnames(detp_minfi))) %>% as.data.frame
+
+#Designate TRUE to where beadcount < 3 and detection p-value > 0.01.
+bad_probes[is.na(bead)] <- T
+bad_probes[detp_minfi > 0.01] <- T
+
+#Check for probes that are unsuccesfully measured in nth% of samples.
+n_samples <- ncol(AMD_MSet.swan)
+bad_probes_count <- rowSums(bad_probes)
+
+#Check thresholds to determine number of probes to remove:
+#Probes that are unsuccessfully measured in 1% of samples.
+sum(bad_probes_count > 0.010*n_samples) #18814 probes.
+
+#Probes that are unsuccessfully measured in 2.5% of samples.
+sum(bad_probes_count > 0.025*n_samples) #5050 probes.
+
+#Probes that are unsuccesfully measured in 5% of samples.
+sum(bad_probes_count > 0.050*n_samples) #3318 probes.
+
+#Remove probes that are unsuccessfully measured in 5% of samples.
+remove_probes <- data.frame(probe_ID = rownames(detp_minfi)) %>% mutate(bad_probes_count = bad_probes_count) %>% filter(bad_probes_count > 0.05*n_samples)
+AMD_MSet.swan <- AMD_MSet.swan[!(rownames(AMD_MSet.swan) %in% remove_probes$probe_ID),]
+dim(AMD_MSet.swan) #443768 probes remaining after detection p-value and beadcount probe filtering. 
+```
+
+
+###Step 5: Probes associated with SNPs removal.
+
+The function dropLociWithSnps allows to drop probes that contain either a SNP at the CpG interrogation or at the single nucleotide extension. 
+
+```{r}
+#Convert MSet object to GenomicMethylSet object.
+AMD_GenomicMSet.swan <- mapToGenome(AMD_MSet.swan)
+
+AMD_GenomicMSet.swan.filt <- dropLociWithSnps(AMD_GenomicMSet.swan, maf = 0.05)
+dim(AMD_GenomicMSet.swan.filt) #437486 probes remaining after probes associated with SNPs are dropped. 
+```
+
+
+###Step 6: Post probe filtering PCA. 
+
+```{r}
+#Load the probe filtered beta matrix.
+betas.swan <- getBeta(AMD_GenomicMSet.swan.filt)
+
+meta <- as.data.frame(pData(AMD_GenomicMSet.swan.filt))
+PCA_full <- princomp(betas.swan) #You can't have NAs in your dataframe - make sure to either remove probes with a lot of NAs and/or have imputed values. Can run na.omit but depending on the stage of pre-processing, could result in a lot of probes to be removed and a very inaccurate PCA.
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance <- vars/sum(vars)
+adjust <- 1-Importance[1]
+pca_adjusted <- Importance[2:length(Importance)]/adjust
+pca_df <- data.frame(adjusted_variance = pca_adjusted, PC = seq(1:length(pca_adjusted)))
+
+#Restructure meta so that variables are in the appropriate format - categorical variables (sex is commonly labelled as 0 and 1) are factors and not numeric for example.
+
+colnames(meta)[6] <- "Sentrix_Position"
+colnames(meta)[7] <- "Sentrix_ID"
+
+meta$Sentrix_ID <- as.factor(meta$Sentrix_ID)
+meta$Sentrix_Position <- as.factor(meta$Sentrix_Position)
+meta$Sex <- as.factor(meta$Sex)
+meta$Sample_Group <- as.factor(meta$Sample_Group)
+meta$Age <- as.numeric(meta$Age)
+
+colnames(meta) #Obtain the column numbers to include.
+meta_categorical <- data.frame(meta[, c(2,3,6,7)])  #Input column numbers in meta that contain categorical variables.
+meta_continuous <- data.frame(meta[,4])  #Input column numbers in meta that contain continuous variables.
+colnames(meta_categorical) #Write the line below to ensure you're changing the names of your variables in the right order.
+colnames(meta_categorical) <- c("Disease state", "Sex", "Position", "Chip")
+colnames(meta_continuous)
+colnames(meta_continuous) <- c("Age")
+
+Order <- c(seq(1:sum(ncol(meta_categorical), ncol(meta_continuous))))
+Num <- 16 #This number will depend on your dataset - if you only have 6 samples, you should probably only show 5 PCs or less.
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.height=7, fig.width=8}
+#Run PCA.
+source("~/KoborLab/kobor_space/kendrix/R_Functions/heat_scree_plot.R", local = knitr::knit_global())
+heat_scree_plot(Loadings, Importance, Num, Order)
+```
+
+
+###Step 7: Save probe-filtered SWAN-normalised object.
+
+```{r}
+save(AMD_GenomicMSet.swan.filt, file = "~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_GenomicMSet.swan.filt.RData")
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##Metadata Correlation
+
+NOTE: Disease State may be slightly correlated with Row and Age may be slightly correlated with Chip.
+
+```{r}
+#Load AMD_GenomicMSet object and get pData.
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_GenomicMSet.swan.filt.RData")
+AMD_pData <- as.data.frame(pData(AMD_GenomicMSet.swan.filt))
+
+#Subset the biological and technical variables to check correlation.
+meta.cor <- AMD_pData[, c(2:4, 6:7)] #I didn't include tissue because they are all the same tissue. 
+colnames(meta.cor)[1] <- "Disease_State"
+colnames(meta.cor)[4] <- "Row"
+colnames(meta.cor)[5] <- "Chip"
+
+#Turn categorical variables into numerical variables.
+meta.cor$Disease_State <- as.numeric(unlist(as.factor(meta.cor$Disease_State)))
+meta.cor$Sex <- as.numeric((unlist(as.factor(meta.cor$Sex))))
+meta.cor$Age <- as.numeric(meta.cor$Age)
+meta.cor$Row <- as.numeric(unlist(as.factor(meta.cor$Row)))
+meta.cor$Chip <- as.numeric(unlist(as.factor(meta.cor$Chip)))
+
+str(meta.cor)
+
+#Metadata correlation.
+grey <- colorRampPalette(brewer.pal(n = 9, "BrBG"))
+heatmap.2(cor(meta.cor, use = "pairwise.complete.obs", method = "spearman"), cexCol = 1.0, cexRow = 1.0, col = grey, dendrogram = "both", scale = "none", margins = c(8,8), trace = "none", keysize = 2)
+
+#Correlation statistical test.
+#Test between Age and Chip (in this case, Slide = Chip).
+summary(lm(Age~Slide, data = AMD_pData))
+summary(aov(Age~Slide, data = AMD_pData))
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+##EWAS
+
+
+###Step 1: Load objects and clean up.
+
+```{r}
+#Load AMD_GenomicMSet object and get M-values and pData.
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_GenomicMSet.swan.filt.RData")
+AMD_pData <- as.data.frame(pData(AMD_GenomicMSet.swan.filt))
+M_values.swan <- getM(AMD_GenomicMSet.swan.filt)
+colnames(AMD_pData)[2] <- "Disease_State"
+colnames(AMD_pData)[6] <- "Row"
+colnames(AMD_pData)[7] <- "Chip"
+
+AMD_pData$Disease_State <- as.factor(AMD_pData$Disease_State)
+AMD_pData$Sex <- as.factor(AMD_pData$Sex)
+AMD_pData$Row <- as.factor(AMD_pData$Row)
+AMD_pData$Chip <- as.factor(AMD_pData$Chip)
+
+#Check order.
+identical(rownames(AMD_pData), colnames(M_values.swan)) #TRUE. 
+
+#Sanity check - there should be no NAs or infinite numbers - which could be a result of logit transformation of 0 or 1 beta values. 
+all(complete.cases(M_values.swan)) == "TRUE" #TRUE - meaning no NA or infinite numbers. 
+```
+
+
+###Step 2: Linear model on Disease State.
+
+Fixed variable: Disease State, Co-variates: Sex, Chip, Interactive (Sex*Disease State)
+
+```{r}
+library(pbapply)
+
+#EWAS on Disease State - All samples.
+#LM: Need to use transformed M-values instead of beta values as it is more statistically sound.
+#Disease state as fixed effects:
+Disease_LM_pval <- pbsapply(1:nrow(M_values.swan), function(CpG){
+  meta <- AMD_pData
+  meta$Mval <- M_values.swan[CpG,]
+  mod_Disease <- lm(Mval ~ Disease_State * Sex + Chip, data = meta) #Sex + Age + Chip + Row as covariates.
+  coef(summary(mod_Disease))[2,4]}) #Returns nominal p-value for Disease State for model at each CpG.
+head(Disease_LM_pval)
+
+#Inspect p-value distribution for model.
+pvalue_dist_Disease <- data.frame(CpG = rownames(M_values.swan), Nominal_P = Disease_LM_pval)
+ggplot(pvalue_dist_Disease, aes(Nominal_P)) + 
+  geom_histogram(fill = "grey90", color = "black") + 
+  theme_classic() + xlab("Nominal P Value") + 
+  ylim(0, 20000) + 
+  xlim(min(Disease_LM_pval), max(Disease_LM_pval))
+#Not right-skewed. Distribution is a little even. 
+
+#Multiple test correction with FDR.
+M_values.swan <- as.data.frame(M_values.swan)
+Multi_test_corr_relaxed <- p.adjust(Disease_LM_pval, method = "fdr", n = length(Disease_LM_pval))
+
+#Looking at FDR thresholds for hits:
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.05),]) #0 at 0.05.
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.1),]) #0 at 0.1.
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.2),]) #0 at 0.2.
+
+#Looking at top hits by nominal P:
+pvalue_dist_Disease <- pvalue_dist_Disease[order(pvalue_dist_Disease$Nominal_P),]
+head(pvalue_dist_Disease)
+
+#Load 450K annotation data.
+manifest <- as.data.frame(getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19))
+head(manifest)
+
+dim(hits_CpGs <- pvalue_dist_Disease[which(pvalue_dist_Disease$Nominal_P < 1e-6),]) #0 hits.
+hits <- manifest[which(manifest$Name%in%hits_CpGs$CpG),]
+hits$UCSC_RefGene_Name
+```
+
+```{r}
+#Delta beta.
+#Using Maggie's code for deltabeta:
+deltabeta <- function(df, mainvar, covar1 = NULL, covar2 = NULL, covar3 = NULL, covar4 = NULL, covar5 = NULL) {
+  # Calculating delta beta of the main variable of interest (mainvar), with up to 5 possible covariates (covar)
+  # mainvar should be a vector of continuous variable
+  # all covars should also be vectors
+  # df = dataframe or matrix of beta values
+  # output is a vector of delta beta values
+  sd=sd(mainvar)
+  qt <-
+    range <- max(mainvar, na.rm = T) - min(mainvar, na.rm = T)
+  dB <- vector(mode = "numeric", length = nrow(df))
+  names(dB) <- rownames(df)
+  for (i in 1:nrow(df)) {
+    beta <- df[i, ]
+    if (is.null(covar1)) {
+      mod <- lm(beta ~ mainvar)
+    } else if (is.null(covar2)) {
+      mod <- lm(beta ~ mainvar + covar1)
+    } else if (is.null(covar3)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2)
+    } else if (is.null(covar4)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3)
+    } else if (is.null(covar5)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3 + covar4)
+    } else {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3 + covar4 + covar5)
+    }
+    slope <- mod$coefficients[2]
+    dB[i] <- as.numeric(slope*range)
+  }
+  dB
+}
+
+betas.swan <- m2beta(M_values.swan)
+
+delta_beta_Disease_fixed <- deltabeta(as.matrix(betas.swan), as.numeric(unlist(as.factor(AMD_pData$Disease_State))), covar1 = as.factor(AMD_pData$Sex), covar2 = as.factor(AMD_pData$Chip))
+length(delta_beta_Disease_fixed)
+summary(delta_beta_Disease_fixed)
+```
+
+```{r}
+##3. Linear Model: Volcano Plot
+#Volcano to examine hits (for DB, see below chunks):
+
+#Call Volcano (Nominal p Version, modified from Rachel's code):
+source("/home/BCRICWH.LAN/dlin/KoborLab/kobor_space/cake/home/dlin/Volcano_DL_Nominal.R")
+
+#After running the last 2 chunks, make a summary table with CpG, Nominal_P, FDR, and Delta Beta.
+Disease_Table <- data.frame(rownames(M_values.swan), Disease_LM_pval, Multi_test_corr_relaxed, delta_beta_Disease_fixed)
+colnames(Disease_Table) = c("CpG", "Nominal_P", "FDR", "Delta_Beta")
+identical(as.character(rownames(Disease_Table)), as.character(Disease_Table$CpG)) #TRUE.
+
+#Looking at top hits quickly without considering DB:
+head(Disease_Table[order(Disease_Table$Nominal_P),],10)
+
+##Setting a threshold of 0.05DB, 5e-6 Nominal P (scale to 0.60DB):
+makeVolcano_nominal(Disease_Table$Nominal_P, Disease_Table$Delta_Beta, 0.05, 5e-6, "DNAm changes", 0.3) #at 5e-6: 0 Hypermethylated, 0 Hypomethylated
+
+#What are these hits?
+#First make an annotated table - load 450K manifest.
+manifest <- as.data.frame(getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19))
+colnames(manifest)
+
+Disease_Table.annotated = merge(Disease_Table, manifest[,c("Name", "chr", "strand", "UCSC_RefGene_Name", "UCSC_RefGene_Group")], by.x = "CpG", by.y = "Name", all = FALSE)
+colnames(Disease_Table.annotated)[5:6] = c("Chromosome", "Coordinate")
+Disease_Table.annotated <- Disease_Table.annotated[order(Disease_Table.annotated$Nominal_P),]
+
+#Grabbing the Volcano hits:
+LM_Disease_Hits <- Disease_Table.annotated[which(abs(Disease_Table.annotated$Delta_Beta)>0.05 & Disease_Table.annotated$Nominal_P<5e-6),]
+
+#Let's order by Nominal_P:
+LM_Disease_Hits = LM_Disease_Hits[order(LM_Disease_Hits$Nominal_P),]
+rownames(LM_Disease_Hits) = c()
+str(LM_Disease_Hits)
+```
+
+
+###Step 3: Linear model on Age.
+
+Fixed variable: Age, Co-variates: Sex, Disease State, Chip and Row.
+
+```{r}
+library(pbapply)
+
+#EWAS on Disease State - All samples.
+#LM: Need to use transformed M-values instead of beta values as it is more statistically sound.
+#Disease state as fixed effects:
+Disease_LM_pval <- pbsapply(1:nrow(M_values.swan), function(CpG){
+  meta <- AMD_pData
+  meta$Mval <- M_values.swan[CpG,]
+  mod_Disease <- lm(Mval ~ Age + Sex + Disease State + Chip + Row, data = meta) #Sex + Age + Chip + Row as covariates.
+  coef(summary(mod_Disease))[2,4]}) #Returns nominal p-value for Disease State for model at each CpG.
+head(Disease_LM_pval)
+
+#Inspect p-value distribution for model.
+pvalue_dist_Disease <- data.frame(CpG = rownames(M_values.swan), Nominal_P = Disease_LM_pval)
+ggplot(pvalue_dist_Disease, aes(Nominal_P)) + 
+  geom_histogram(fill = "grey90", color = "black") + 
+  theme_classic() + xlab("Nominal P Value") + 
+  ylim(0, 20000) + 
+  xlim(min(Disease_LM_pval), max(Disease_LM_pval))
+#Not right-skewed. Distribution is a little even. 
+
+#Multiple test correction with FDR.
+M_values.swan <- as.data.frame(M_values.swan)
+Multi_test_corr_relaxed <- p.adjust(Disease_LM_pval, method = "fdr", n = length(Disease_LM_pval))
+
+#Looking at FDR thresholds for hits:
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.05),]) #0 at 0.05.
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.1),]) #0 at 0.1.
+dim(as.data.frame(M_values.swan)[which(Multi_test_corr_relaxed <= 0.2),]) #0 at 0.2.
+
+#Looking at top hits by nominal P:
+pvalue_dist_Disease <- pvalue_dist_Disease[order(pvalue_dist_Disease$Nominal_P),]
+head(pvalue_dist_Disease)
+
+#Load 450K annotation data.
+manifest <- as.data.frame(getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19))
+head(manifest)
+
+dim(hits_CpGs <- pvalue_dist_Disease[which(pvalue_dist_Disease$Nominal_P < 1e-6),]) #0 hits.
+hits <- manifest[which(manifest$Name%in%hits_CpGs$CpG),]
+hits$UCSC_RefGene_Name
+```
+
+```{r}
+#Delta beta.
+#Using Maggie's code for deltabeta:
+deltabeta <- function(df, mainvar, covar1 = NULL, covar2 = NULL, covar3 = NULL, covar4 = NULL, covar5 = NULL) {
+  # Calculating delta beta of the main variable of interest (mainvar), with up to 5 possible covariates (covar)
+  # mainvar should be a vector of continuous variable
+  # all covars should also be vectors
+  # df = dataframe or matrix of beta values
+  # output is a vector of delta beta values
+  sd=sd(mainvar)
+  qt <-
+    range <- max(mainvar, na.rm = T) - min(mainvar, na.rm = T)
+  dB <- vector(mode = "numeric", length = nrow(df))
+  names(dB) <- rownames(df)
+  for (i in 1:nrow(df)) {
+    beta <- df[i, ]
+    if (is.null(covar1)) {
+      mod <- lm(beta ~ mainvar)
+    } else if (is.null(covar2)) {
+      mod <- lm(beta ~ mainvar + covar1)
+    } else if (is.null(covar3)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2)
+    } else if (is.null(covar4)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3)
+    } else if (is.null(covar5)) {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3 + covar4)
+    } else {
+      mod <- lm(beta ~ mainvar + covar1 + covar2 + covar3 + covar4 + covar5)
+    }
+    slope <- mod$coefficients[2]
+    dB[i] <- as.numeric(slope*range)
+  }
+  dB
+}
+
+betas.swan <- m2beta(M_values.swan)
+
+delta_beta_Disease_fixed <- deltabeta(as.matrix(betas.swan), AMD_pData$Age, covar1 = as.factor(AMD_pData$Disease_State), covar2 = as.factor(AMD_pData$Sex), covar3 = as.factor(AMD_pData$Chip), covar4 = as.factor(AMD_pData$Row))
+length(delta_beta_Disease_fixed)
+summary(delta_beta_Disease_fixed)
+```
+
+```{r}
+##3. Linear Model: Volcano Plot
+#Volcano to examine hits (for DB, see below chunks):
+
+#Call Volcano (Nominal p Version, modified from Rachel's code):
+source("/home/BCRICWH.LAN/dlin/KoborLab/kobor_space/cake/home/dlin/Volcano_DL_Nominal.R")
+
+#After running the last 2 chunks, make a summary table with CpG, Nominal_P, FDR, and Delta Beta.
+Disease_Table <- data.frame(rownames(M_values.swan), Disease_LM_pval, Multi_test_corr_relaxed, delta_beta_Disease_fixed)
+colnames(Disease_Table) = c("CpG", "Nominal_P", "FDR", "Delta_Beta")
+identical(as.character(rownames(Disease_Table)), as.character(Disease_Table$CpG)) #TRUE.
+
+#Looking at top hits quickly without considering DB:
+head(Disease_Table[order(Disease_Table$Nominal_P),],10)
+
+##Setting a threshold of 0.05DB, 5e-6 Nominal P (scale to 0.60DB):
+makeVolcano_nominal(Disease_Table$Nominal_P, Disease_Table$Delta_Beta, 0.05, 5e-6, "DNAm changes", 0.3) #at 5e-6: 0 Hypermethylated, 0 Hypomethylated
+
+#What are these hits?
+#First make an annotated table - load 450K manifest.
+manifest <- as.data.frame(getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19))
+colnames(manifest)
+
+Disease_Table.annotated = merge(Disease_Table, manifest[,c("Name", "chr", "strand", "UCSC_RefGene_Name", "UCSC_RefGene_Group")], by.x = "CpG", by.y = "Name", all = FALSE)
+colnames(Disease_Table.annotated)[5:6] = c("Chromosome", "Coordinate")
+Disease_Table.annotated <- Disease_Table.annotated[order(Disease_Table.annotated$Nominal_P),]
+
+#Grabbing the Volcano hits:
+LM_Disease_Hits <- Disease_Table.annotated[which(abs(Disease_Table.annotated$Delta_Beta)>0.05 & Disease_Table.annotated$Nominal_P<5e-6),]
+
+#Let's order by Nominal_P:
+LM_Disease_Hits = LM_Disease_Hits[order(LM_Disease_Hits$Nominal_P),]
+rownames(LM_Disease_Hits) = c()
+str(LM_Disease_Hits)
+```
+
+
+
+
+
+
+
+
+
+```{r, eval=FALSE}
+#Load AMD_GenomicMSet object and get M-values and pData.
+load("~/KoborLab/kobor_space/kendrix/macular_degeneration/data/AMD_GenomicMSet.swan.filt.RData")
+AMD_pData <- as.data.frame(pData(AMD_GenomicMSet.swan.filt))
+AMD_M_values <- getM(AMD_GenomicMSet.swan.filt)
+colnames(AMD_pData)[2] <- "Disease_State"
+colnames(AMD_pData)[6] <- "Row"
+colnames(AMD_pData)[7] <- "Chip"
+
+AMD_pData$Disease_State <- as.factor(AMD_pData$Disease_State)
+AMD_pData$Sex <- as.factor(AMD_pData$Sex)
+AMD_pData$Row <- as.factor(AMD_pData$Row)
+AMD_pData$Chip <- as.factor(AMD_pData$Chip)
+
+#Differential methylation positions
+dmp <- dmpFinder(AMD_M_values, pheno = AMD_pData$Disease_State, type = "categorical")
+head(dmp)
+
+
+
+
+#Create design matrix.
+design <- model.matrix(~Disease_State+Sex+Age+Row+Chip, data = AMD_pData)
+colnames(design) <- c("Intercept", "normal")
+
+colnames(design) <- c("AMD", "normal", "Male", "Age", "R01C02", "R02C01", "R02C02", "R03C01", "R03C02", "R04C01", "R04C02", "R05C01", "R05C02", "R06C01", "R06C02", "B89", "B90", "B39")
+
+#Fit linear model.
+fit <- lmFit(AMD_M_values, design)
+
+#Create a contrast matrix for specific comparisons.
+contMatrix <- makeContrasts(AMD - normal, levels = design)
+contMatrix
+
+#Fit the contrasts.
+fit2 <- contrasts.fit(fit, contMatrix)
+fit2 <- eBayes(fit)
+
+topTable(fit2)
+
+#Look at the numbers of DM CpGs at FDR < 0.05.
+summary(decideTests(fit2))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

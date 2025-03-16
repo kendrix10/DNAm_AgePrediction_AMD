@@ -1,0 +1,30 @@
+"Sample_Name","Sample_Group","Sentrix_ID","Sentrix_Position","Sex","Tissue","Age"
+"Sample 1","blood","6042308131","R01C01","male","blood",58
+"Sample 2","optic choroid","6042308131","R01C02","male","optic choroid",58
+"Sample 3","optic nerve","6042308131","R02C01","male","optic nerve",58
+"Sample 4","retina","6042308131","R02C02","male","retina",58
+"Sample 5","blood","6042308131","R03C01","male","blood",56
+"Sample 6","optic choroid","6042308131","R03C02","male","optic choroid",56
+"Sample 7","optic nerve","6042308131","R04C01","male","optic nerve",56
+"Sample 8","retina","6042308131","R04C02","male","retina",56
+"Sample 9","blood","6042308131","R05C01","male","blood",76
+"Sample 10","optic choroid","6042308131","R05C02","male","optic choroid",76
+"Sample 11","optic nerve","6042308131","R06C01","male","optic nerve",76
+"Sample 12","retina","6042308131","R06C02","male","retina",76
+"Sample 13","blood","6042308133","R01C01","male","blood",37
+"Sample 14","optic choroid","6042308133","R01C02","male","optic choroid",37
+"Sample 15","optic nerve","6042308133","R02C01","male","optic nerve",37
+"Sample 16","retina","6042308133","R02C02","male","retina",37
+"Sample 17","blood","6042308133","R03C01","male","blood",63
+"Sample 18","optic choroid","6042308133","R03C02","male","optic choroid",63
+"Sample 19","optic nerve","6042308133","R04C01","male","optic nerve",63
+"Sample 20","retina","6042308133","R04C02","male","retina",63
+"Sample 21","blood","6042308133","R05C01","male","blood",67
+"Sample 22","optic choroid","6042308133","R05C02","male","optic choroid",67
+"Sample 23","optic nerve","6042308133","R06C01","male","optic nerve",67
+"Sample 24","retina","6042308133","R06C02","male","retina",67
+"Sample 25","optic choroid","6042308134","R01C01","male","optic choroid",66
+"Sample 26","optic nerve","6042308134","R02C01","male","optic nerve",66
+"Sample 27","retina","6042308134","R03C01","male","retina",66
+"Sample 28","retina","6042308134","R04C01","male","retina",62
+"Sample 29","blood","6042308134","R05C01","male","blood",62
